@@ -3,3 +3,4 @@ tgcrypto
 yt-dlp[default,curl-cffi]
 aiohttp
 aiohttp-cors
+gallery-dl
