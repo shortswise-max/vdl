@@ -1,7 +1,7 @@
 import asyncio
 asyncio.set_event_loop(asyncio.new_event_loop())
 
-import os, time, math, subprocess, json, aiohttp
+import os, time, math, subprocess, aiohttp
 from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, 
@@ -12,39 +12,9 @@ from pyrogram.errors import MessageNotModified, FloodWait
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
 # ==========================================
-# 0. FIREBASE DATABASE SETUP (REST API)
+# 0. FIREBASE DATABASE SETUP
 # ==========================================
-# Aapka Firebase Database URL
 FIREBASE_URL = "https://fastdldbot-default-rtdb.firebaseio.com"
-
-async def get_coins(user_id):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{FIREBASE_URL}/users/{user_id}/coins.json") as resp:
-                data = await resp.json()
-                if data is None:
-                    # Naya user aaya hai, 5 coins de do
-                    await update_coins_db(user_id, 5, is_set=True)
-                    return 5
-                return int(data)
-    except Exception as e:
-        print("Firebase Error:", e)
-        return 0
-
-async def update_coins_db(user_id, amount, is_set=False):
-    try:
-        if is_set:
-            new_coins = amount
-        else:
-            current = await get_coins(user_id)
-            new_coins = current + amount
-            
-        async with aiohttp.ClientSession() as session:
-            async with session.put(f"{FIREBASE_URL}/users/{user_id}/coins.json", json=new_coins) as resp:
-                return new_coins
-    except Exception as e:
-        print("Firebase PUT Error:", e)
-        return 0
 
 # ==========================================
 # 1. BOT CREDENTIALS
@@ -62,6 +32,9 @@ STOP_UPLOAD = {}
 URL_CACHE = {} 
 GLOBAL_CANCEL = False
 
+# ==========================================
+# 2. HELPER FUNCTIONS
+# ==========================================
 def format_bytes(size):
     size = int(size)
     if not size: return '0 B'
@@ -70,6 +43,17 @@ def format_bytes(size):
     dic_powerN = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
     while size > power: size /= power; n += 1
     return f"{round(size, 2)} {dic_powerN[n]}"
+
+def generate_thumbnail(video_path, thumbnail_path):
+    try:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", "00:00:50", "-i", video_path, "-vframes", "1", "-q:v", "2", "-vf", "scale=320:-1", thumbnail_path, "-y"]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0: return thumbnail_path
+        cmd[5] = "00:00:02"
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0: return thumbnail_path
+    except Exception: pass
+    return None
 
 def get_formats(url):
     ydl_opts = {'socket_timeout': 15, 'retries': 3, 'quiet': True, 'noplaylist': True, 'impersonate': ImpersonateTarget.from_str('chrome'), 'extractor_args': {'youtube': ['player_client=ios,android']}, 'http_headers': {'User-Agent': 'Mozilla/5.0'}}
@@ -85,78 +69,209 @@ def get_formats(url):
         if not available_res: available_res = sorted(list(resolutions)) 
         return available_res, info.get('extractor_key', 'Unknown Website')
 
+# (Baaki Download aur Progress bar functions yaha add karo jo original me the. Unko chhota rakhne ke liye skip kiya hai)
+class CancelledError(Exception): pass
+class MyLogger(object):
+    def __init__(self, msg_id): self.msg_id = msg_id
+    def debug(self, msg):
+        if GLOBAL_CANCEL or (self.msg_id and CANCEL_TASKS.get(self.msg_id)): raise CancelledError("Cancelled")
+    def warning(self, msg): pass
+    def error(self, msg): pass
+
+def download_with_ytdlp(url, msg, selected_res, loop):
+    global GLOBAL_CANCEL
+    msg_id = msg.id if msg else None
+    if GLOBAL_CANCEL or (msg_id and CANCEL_TASKS.get(msg_id)): return None, None
+    last_edit_time = [0]
+    
+    def progress_hook(d):
+        if GLOBAL_CANCEL or (msg_id and CANCEL_TASKS.get(msg_id)): raise CancelledError("Download Cancelled")
+        if msg.chat.id < 0: return
+        if d['status'] == 'downloading':
+            current_time = time.time()
+            if current_time - last_edit_time[0] > 5.0: 
+                last_edit_time[0] = current_time
+                downloaded = d.get('downloaded_bytes', 0)
+                total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+                speed = d.get('speed', 0)
+                if total > 0:
+                    percentage = downloaded * 100 / total
+                    progress = "[{0}{1}]".format(''.join(["█" for i in range(math.floor(percentage / 10))]), ''.join(["░" for i in range(10 - math.floor(percentage / 10))]))
+                    text = f"⚡ **Downloading...** {selected_res}p\n📊 {progress} **{round(percentage, 2)}%**\n📦 **Size:** {format_bytes(downloaded)} / {format_bytes(total)}\n⚡ **Speed:** {format_bytes(speed)}/s"
+                else:
+                    text = f"⚡ **Downloading...** {selected_res}p\n📦 {format_bytes(downloaded)}\n⚡ {format_bytes(speed)}/s"
+                
+                reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg_id}")]])
+                async def edit_message():
+                    try: await msg.edit_text(text, reply_markup=reply_markup)
+                    except: pass
+                asyncio.run_coroutine_threadsafe(edit_message(), loop)
+
+    ydl_opts = {'socket_timeout': 15, 'retries': 3, 'fragment_retries': 3, 'outtmpl': '%(id)s.%(ext)s', 'format': f'bestvideo[height<={selected_res}]+bestaudio/best[height<={selected_res}]/best', 'merge_output_format': 'mp4', 'fixup': 'never', 'quiet': True, 'noplaylist': True, 'impersonate': ImpersonateTarget.from_str('chrome'), 'extractor_args': {'youtube': ['player_client=ios,android']}, 'external_downloader': 'aria2c', 'external_downloader_args': ['-c', '-x', '16', '-s', '16', '-k', '1M', '--connect-timeout=15', '--timeout=20', '--max-tries=5'], 'logger': MyLogger(msg_id) if msg_id else MyLogger("none"), 'progress_hooks': [progress_hook]}
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            if not filename.endswith('.mp4') and os.path.exists(filename):
+                new_filename = filename.rsplit('.', 1)[0] + '.mp4'
+                os.rename(filename, new_filename)
+                filename = new_filename
+            return info, filename
+    except CancelledError: return None, "CANCELLED"
+    except Exception as e: return None, f"YTDLP_ERROR: {str(e)}"
+
+async def progress_bar(current, total, msg, start_time, action="Uploading"):
+    global GLOBAL_CANCEL
+    if GLOBAL_CANCEL or STOP_UPLOAD.get(msg.id): raise Exception("Upload Cancelled")
+    if msg.chat.id < 0: return
+    now = time.time()
+    diff = now - start_time
+    if diff < 1: return 
+    if round(diff % 3.00) == 0 or current == total:
+        percentage = current * 100 / total
+        speed = current / diff
+        time_to_completion = round((total - current) / speed) if speed > 0 else 0
+        progress = "[{0}{1}]".format(''.join(["█" for i in range(math.floor(percentage / 10))]), ''.join(["░" for i in range(10 - math.floor(percentage / 10))]))
+        text = f"🚀 **{action}...**\n📊 {progress} **{round(percentage, 2)}%**\n📦 **Size:** {format_bytes(current)} / {format_bytes(total)}\n⚡ **Speed:** {format_bytes(speed)}/s\n⏳ **ETA:** {time_to_completion}s"
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg.id}")]])
+        try: await msg.edit_text(text, reply_markup=reply_markup)
+        except: pass
+
+async def process_queue():
+    global GLOBAL_CANCEL
+    while True:
+        task = await download_queue.get()
+        url, chat_id, msg, selected_res = task  
+        GLOBAL_CANCEL = False
+        if url in queue_display: queue_display.remove(url) 
+        if CANCEL_TASKS.get(msg.id) or GLOBAL_CANCEL: download_queue.task_done(); continue
+
+        try:
+            cancel_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg.id}")]]) if msg.chat.id > 0 else None
+            await msg.edit_text(f"⚡ Downloading locally...\nQuality: {selected_res}p", reply_markup=cancel_markup)
+            current_loop = asyncio.get_running_loop()
+            info, filename = await asyncio.to_thread(download_with_ytdlp, url, msg, selected_res, current_loop)
+            
+            if filename == "CANCELLED" or CANCEL_TASKS.get(msg.id) or GLOBAL_CANCEL: raise Exception("Cancelled by user")
+            if not info and filename and filename.startswith("YTDLP_ERROR:"): raise Exception(filename.replace("YTDLP_ERROR: ", ""))
+            if not filename: raise Exception("Download failed.")
+
+            thumb_path = f"thumb_{msg.id}.jpg"
+            thumb = generate_thumbnail(filename, thumb_path)
+            local_caption = f"**🎬 Title:** {info.get('title', 'Unknown')}\n**🌐 Website:** {info.get('extractor_key', 'Unknown')}\n**⚙️ Quality:** {selected_res}p\n**🔗 Source:** [Original Link]({url})"
+
+            await msg.edit_text("📤 Uploading...", reply_markup=cancel_markup)
+            start_time = time.time()
+            upload_success = False
+            for attempt in range(3):
+                if CANCEL_TASKS.get(msg.id) or STOP_UPLOAD.get(msg.id) or GLOBAL_CANCEL: raise Exception("Upload Cancelled")
+                try:
+                    await asyncio.wait_for(app.send_video(chat_id=chat_id, video=filename, thumb=thumb, caption=local_caption, supports_streaming=True, progress=progress_bar, progress_args=(msg, start_time, "Uploading")), timeout=900)
+                    upload_success = True; break
+                except asyncio.TimeoutError: pass
+                except FloodWait as e: await asyncio.sleep(e.value + 3)
+                except Exception as e:
+                    if "Upload Cancelled" in str(e): raise e
+                    await asyncio.sleep(5)
+
+            if upload_success: await msg.delete()
+            else: await msg.edit_text("❌ Upload failed after multiple attempts.")
+            if os.path.exists(filename): os.remove(filename)
+            if thumb and os.path.exists(thumb): os.remove(thumb)
+
+        except Exception as e:
+            if "Cancelled" in str(e) or GLOBAL_CANCEL:
+                 try: await msg.edit_text("❌ Download Cancelled.")
+                 except: pass
+                 subprocess.run(["pkill", "-f", "aria2c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                 try: await msg.edit_text(f"❌ Error: {str(e)}")
+                 except: pass
+        finally:
+            if msg.id in CANCEL_TASKS: del CANCEL_TASKS[msg.id]
+            if msg.id in STOP_UPLOAD: del STOP_UPLOAD[msg.id]
+            try: download_queue.task_done()
+            except: pass
+
 # ==========================================
-# 2. TELEGRAM HANDLERS
+# 3. FIREBASE BACKGROUND BRIDGE (WebApp Se Baat)
+# ==========================================
+async def process_webapp_checking(user_id, url):
+    async with aiohttp.ClientSession() as session:
+        # State processing kardo taaki loop dobara na uthaye
+        await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "processing_check"})
+        try:
+            res_list, website = await asyncio.to_thread(get_formats, url)
+            if not res_list: res_list = [360, 480, 720, 1080]
+            
+            # WebApp ko wapas qualities bhej do
+            await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={
+                "step": "choosing",
+                "qualities": res_list,
+                "website": website
+            })
+        except Exception as e:
+            await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "error", "error_msg": str(e)})
+
+async def process_webapp_downloading(user_id, url, res):
+    async with aiohttp.ClientSession() as session:
+        # Completed mark kardo taaki WebApp reset ho sake
+        await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "completed"})
+    try:
+        # Telegram chat me msg bhej do aur queue me laga do
+        msg = await app.send_message(int(user_id), f"✅ Link received from WebApp!\n**Link:** {url}\n**Quality:** {res}p\n⏳ Processing...")
+        URL_CACHE[msg.id] = url
+        queue_display.append(url)
+        await download_queue.put((url, int(user_id), msg, res))
+    except Exception as e:
+        print("Telegram Send Error:", e)
+
+async def firebase_polling():
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{FIREBASE_URL}/tasks.json") as resp:
+                    tasks = await resp.json()
+                    if tasks:
+                        for user_id, task in tasks.items():
+                            if not task: continue
+                            step = task.get("step")
+                            
+                            if step == "checking":
+                                asyncio.create_task(process_webapp_checking(user_id, task.get("url")))
+                            elif step == "downloading":
+                                asyncio.create_task(process_webapp_downloading(user_id, task.get("url"), task.get("res")))
+        except Exception as e:
+            pass
+        await asyncio.sleep(1.5) # Har 1.5 seconds me Firebase check karega
+
+# ==========================================
+# 4. TELEGRAM HANDLERS
 # ==========================================
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    # 🔴 APNA ASLI BLOGGER WALA LINK DALEIN 🔴
-    BLOGGER_URL = "https://unidl.blogspot.com"
+    # 🔴 YAHAN APNA ASLI BLOGGER WALA LINK DALEIN 🔴
+    BLOGGER_URL = "https://aapka-blogger-link.blogspot.com"
     
     markup = ReplyKeyboardMarkup(
         [[KeyboardButton("🎬 Open Downloader App", web_app=WebAppInfo(url=BLOGGER_URL))]],
         resize_keyboard=True
     )
     
-    coins = await get_coins(message.from_user.id)
-    
-    text = (
-        "Hello! Main Premium Downloader hoon.\n\n"
-        f"🪙 **Your Coins:** {coins}\n"
-        "*(1 Download = 1 Coin. Get free coins by watching ads!)*\n\n"
-        "👇 Niche diye gaye **Open Downloader App** button pe click karo!"
-    )
+    text = (f"Hello! Main Smart WebApp Downloader hoon.\n\n👇 Niche diye gaye **Open Downloader App** button pe click karo aur seedha wahi se sab manage karo!")
     await message.reply_text(text, reply_markup=markup)
 
-
-@app.on_message(filters.private & ~filters.command(["start"]))
-async def handle_requests(client, message):
-    user_id = message.from_user.id
-    url = None
-    
-    # URL kahan se aaya? WebApp se ya Direct Text se?
-    if getattr(message, "web_app_data", None):
-        url = message.web_app_data.data
-    elif message.text and message.text.startswith("http"):
-        url = message.text.strip()
-        
-    if url:
-        # User ke Coins Firebase se check karo
-        coins = await get_coins(user_id)
-        
-        if coins <= 0:
-            await message.reply_text("❌ Aapke paas 0 Coins hain! Please **Open Downloader App** pe click karein aur free Coins claim karein.")
-            return
-            
-        # 1 Coin cut karo Firebase me
-        await update_coins_db(user_id, -1)
-        remaining = coins - 1
-        
-        msg = await message.reply_text(f"🔍 Checking link...\n🪙 Remaining Coins: {remaining}")
-        URL_CACHE[msg.id] = url
-        
-        try:
-            res_list, website = await asyncio.to_thread(get_formats, url)
-            if not res_list: res_list = [360, 480, 720, 1080] 
-            
-            buttons = []
-            row = []
-            for res in res_list:
-                row.append(InlineKeyboardButton(f"🎬 {res}p", callback_data=f"res_{res}_{msg.id}"))
-                if len(row) == 2:
-                    buttons.append(row); row = []
-            if row: buttons.append(row) 
-            buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg.id}")])
-            
-            await msg.edit_text(f"**🔗 Link:** {url}\n**🌐 Source:** {website}\n\n👇 **Select Quality:**", reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
-        except Exception as e:
-            # Agar Error aaya, toh Coin wapas de do
-            await update_coins_db(user_id, 1)
-            await msg.edit_text(f"❌ Error: {str(e)}\n(Coin Refunded)")
-
-# (Baaki aapka original select_resolution, download_with_ytdlp, aur process_queue logic wahi rahega)
+@app.on_callback_query(filters.regex(r"^cancel_"))
+async def cancel_callback(client, callback_query):
+    msg_id = int(callback_query.data.split("_")[1])
+    CANCEL_TASKS[msg_id] = True; STOP_UPLOAD[msg_id] = True 
+    await callback_query.answer("Cancelling task... Please wait!", show_alert=True)
+    try: await callback_query.message.edit_text("❌ Task Cancelled.")
+    except: pass
 
 if __name__ == "__main__":
-    print("Bot is running with Firebase Database!")
+    print("Bot is running with Firebase Bridge!")
+    loop = asyncio.get_event_loop()
+    loop.create_task(process_queue())
+    loop.create_task(firebase_polling()) # Naya bridge chalu kiya
     app.run()
-    
