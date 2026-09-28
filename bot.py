@@ -16,6 +16,35 @@ from yt_dlp.networking.impersonate import ImpersonateTarget
 # ==========================================
 FIREBASE_URL = "https://fastdldbot-default-rtdb.firebaseio.com"
 
+async def get_coins(user_id):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{FIREBASE_URL}/users/{user_id}/coins.json") as resp:
+                data = await resp.json()
+                if data is None:
+                    # Naya user aaya hai, 5 coins de do
+                    await update_coins_db(user_id, 5, is_set=True)
+                    return 5
+                return int(data)
+    except Exception as e:
+        print("Firebase Error:", e)
+        return 0
+
+async def update_coins_db(user_id, amount, is_set=False):
+    try:
+        if is_set:
+            new_coins = amount
+        else:
+            current = await get_coins(user_id)
+            new_coins = current + amount
+            
+        async with aiohttp.ClientSession() as session:
+            async with session.put(f"{FIREBASE_URL}/users/{user_id}/coins.json", json=new_coins) as resp:
+                return new_coins
+    except Exception as e:
+        print("Firebase PUT Error:", e)
+        return 0
+
 # ==========================================
 # 1. BOT CREDENTIALS
 # ==========================================
@@ -36,7 +65,13 @@ GLOBAL_CANCEL = False
 # 2. HELPER FUNCTIONS
 # ==========================================
 def format_bytes(size):
-    size = int(size)
+    # 🔥 FIX: Agar yt-dlp None bhejta hai toh crash nahi hoga
+    if size is None: return '0 B'
+    try:
+        size = int(size)
+    except:
+        return '0 B'
+        
     if not size: return '0 B'
     power = 2**10
     n = 0
@@ -69,7 +104,6 @@ def get_formats(url):
         if not available_res: available_res = sorted(list(resolutions)) 
         return available_res, info.get('extractor_key', 'Unknown Website')
 
-# (Baaki Download aur Progress bar functions yaha add karo jo original me the. Unko chhota rakhne ke liye skip kiya hai)
 class CancelledError(Exception): pass
 class MyLogger(object):
     def __init__(self, msg_id): self.msg_id = msg_id
@@ -87,13 +121,22 @@ def download_with_ytdlp(url, msg, selected_res, loop):
     def progress_hook(d):
         if GLOBAL_CANCEL or (msg_id and CANCEL_TASKS.get(msg_id)): raise CancelledError("Download Cancelled")
         if msg.chat.id < 0: return
+        
         if d['status'] == 'downloading':
             current_time = time.time()
             if current_time - last_edit_time[0] > 5.0: 
                 last_edit_time[0] = current_time
-                downloaded = d.get('downloaded_bytes', 0)
-                total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-                speed = d.get('speed', 0)
+                
+                # 🔥 FIX: None values ko safe 0 me convert karna
+                downloaded = d.get('downloaded_bytes')
+                if downloaded is None: downloaded = 0
+                
+                total = d.get('total_bytes') or d.get('total_bytes_estimate')
+                if total is None: total = 0
+                
+                speed = d.get('speed')
+                if speed is None: speed = 0
+                
                 if total > 0:
                     percentage = downloaded * 100 / total
                     progress = "[{0}{1}]".format(''.join(["█" for i in range(math.floor(percentage / 10))]), ''.join(["░" for i in range(10 - math.floor(percentage / 10))]))
@@ -192,33 +235,37 @@ async def process_queue():
             if msg.id in STOP_UPLOAD: del STOP_UPLOAD[msg.id]
             try: download_queue.task_done()
             except: pass
+
 # ==========================================
 # 3. FIREBASE BACKGROUND BRIDGE (WebApp Se Baat)
 # ==========================================
 async def process_webapp_checking(user_id, url):
     print(f"🔍 Checking URL for User {user_id}: {url}")
     async with aiohttp.ClientSession() as session:
-        # State processing_check kardo taaki loop dobara na uthaye
         await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "processing_check"})
         try:
             res_list, website = await asyncio.to_thread(get_formats, url)
-            if not res_list: res_list = [360, 480, 720, 1080]
-            
+            if not res_list: 
+                res_list = [360, 480, 720, 1080]
             print(f"✅ Qualities Found: {res_list}")
-            # WebApp ko wapas qualities bhej do
+        except Exception as e:
+            # 🔥 FIX: Agar error aaye toh fallback qualities dega, WebApp par error nahi jayegi
+            print(f"⚠️ yt-dlp Format Fetch Failed: {str(e)} -> Using Defaults")
+            res_list = [360, 480, 720, 1080]
+            website = "Media Link"
+            
+        try:
             await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={
                 "step": "choosing",
                 "qualities": res_list,
                 "website": website
             })
         except Exception as e:
-            print(f"❌ yt-dlp Error: {str(e)}")
-            await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "error", "error_msg": "Failed to fetch link details."})
+            print("Firebase Patch Error:", e)
 
 async def process_webapp_downloading(user_id, url, res):
     print(f"📥 Download triggered for User {user_id} - Quality: {res}p")
     async with aiohttp.ClientSession() as session:
-        # Completed mark kardo taaki WebApp reset ho sake
         await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "completed"})
     try:
         msg = await app.send_message(int(user_id), f"✅ Task Received from WebApp!\n**Link:** {url}\n**Quality:** {res}p\n⏳ Processing...")
@@ -237,7 +284,7 @@ async def firebase_polling():
                     tasks = await resp.json()
                     
                     if tasks:
-                        # 🔥 FIREBASE BUG FIX: List vs Dict handler
+                        # 🔥 BUG FIX: Handle list or dict return from Firebase correctly
                         if isinstance(tasks, list):
                             task_items = enumerate(tasks)
                         elif isinstance(tasks, dict):
@@ -249,15 +296,15 @@ async def firebase_polling():
                             if not task or not isinstance(task, dict): continue
                             
                             step = task.get("step")
-                            
                             if step == "checking":
                                 asyncio.create_task(process_webapp_checking(user_id, task.get("url")))
                             elif step == "downloading":
                                 asyncio.create_task(process_webapp_downloading(user_id, task.get("url"), task.get("res")))
         except Exception as e:
-            print("⚠️ Firebase Polling Error:", e)
+            # print("⚠️ Firebase Polling Error:", e) # Commented to avoid spam on random drops
+            pass
             
-        await asyncio.sleep(1.5) # Har 1.5 seconds me Firebase check karega
+        await asyncio.sleep(1.5)
 
 # ==========================================
 # 4. TELEGRAM HANDLERS
@@ -272,7 +319,8 @@ async def start(client, message):
         resize_keyboard=True
     )
     
-    text = (f"Hello! Main Smart WebApp Downloader hoon.\n\n👇 Niche diye gaye **Open Downloader App** button pe click karo aur seedha wahi se sab manage karo!")
+    coins = await get_coins(message.from_user.id)
+    text = (f"Hello! Main Smart WebApp Downloader hoon.\n\n🪙 **Your Coins:** {coins}\n*(1 Download = 1 Coin. Get free coins by watching ads!)*\n\n👇 Niche diye gaye **Open Downloader App** button pe click karo!")
     await message.reply_text(text, reply_markup=markup)
 
 @app.on_callback_query(filters.regex(r"^cancel_"))
@@ -283,9 +331,24 @@ async def cancel_callback(client, callback_query):
     try: await callback_query.message.edit_text("❌ Task Cancelled.")
     except: pass
 
+@app.on_message(filters.command("cancelall"))
+async def cancel_all(client, message):
+    global queue_display, GLOBAL_CANCEL
+    GLOBAL_CANCEL = True
+    queue_display.clear()
+    while not download_queue.empty():
+        try: download_queue.get_nowait(); download_queue.task_done()
+        except: pass
+    subprocess.run(["pkill", "-f", "aria2c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for msg_id in list(URL_CACHE.keys()) + list(CANCEL_TASKS.keys()) + list(STOP_UPLOAD.keys()):
+        CANCEL_TASKS[msg_id] = True; STOP_UPLOAD[msg_id] = True
+    await message.reply_text("🗑️ Pura queue WIPE OUT kar diya gaya hai! ✅")
+    await asyncio.sleep(2)
+    GLOBAL_CANCEL = False
+
 if __name__ == "__main__":
     print("Bot is running with Firebase Bridge!")
     loop = asyncio.get_event_loop()
     loop.create_task(process_queue())
-    loop.create_task(firebase_polling()) # Naya bridge chalu kiya
+    loop.create_task(firebase_polling()) 
     app.run()
