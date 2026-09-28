@@ -192,18 +192,19 @@ async def process_queue():
             if msg.id in STOP_UPLOAD: del STOP_UPLOAD[msg.id]
             try: download_queue.task_done()
             except: pass
-
 # ==========================================
 # 3. FIREBASE BACKGROUND BRIDGE (WebApp Se Baat)
 # ==========================================
 async def process_webapp_checking(user_id, url):
+    print(f"🔍 Checking URL for User {user_id}: {url}")
     async with aiohttp.ClientSession() as session:
-        # State processing kardo taaki loop dobara na uthaye
+        # State processing_check kardo taaki loop dobara na uthaye
         await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "processing_check"})
         try:
             res_list, website = await asyncio.to_thread(get_formats, url)
             if not res_list: res_list = [360, 480, 720, 1080]
             
+            print(f"✅ Qualities Found: {res_list}")
             # WebApp ko wapas qualities bhej do
             await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={
                 "step": "choosing",
@@ -211,30 +212,42 @@ async def process_webapp_checking(user_id, url):
                 "website": website
             })
         except Exception as e:
-            await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "error", "error_msg": str(e)})
+            print(f"❌ yt-dlp Error: {str(e)}")
+            await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "error", "error_msg": "Failed to fetch link details."})
 
 async def process_webapp_downloading(user_id, url, res):
+    print(f"📥 Download triggered for User {user_id} - Quality: {res}p")
     async with aiohttp.ClientSession() as session:
         # Completed mark kardo taaki WebApp reset ho sake
         await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "completed"})
     try:
-        # Telegram chat me msg bhej do aur queue me laga do
-        msg = await app.send_message(int(user_id), f"✅ Link received from WebApp!\n**Link:** {url}\n**Quality:** {res}p\n⏳ Processing...")
+        msg = await app.send_message(int(user_id), f"✅ Task Received from WebApp!\n**Link:** {url}\n**Quality:** {res}p\n⏳ Processing...")
         URL_CACHE[msg.id] = url
         queue_display.append(url)
         await download_queue.put((url, int(user_id), msg, res))
     except Exception as e:
-        print("Telegram Send Error:", e)
+        print("❌ Telegram Send Error:", e)
 
 async def firebase_polling():
+    print("🚀 Firebase Bridge Polling Started...")
     while True:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{FIREBASE_URL}/tasks.json") as resp:
                     tasks = await resp.json()
+                    
                     if tasks:
-                        for user_id, task in tasks.items():
-                            if not task: continue
+                        # 🔥 FIREBASE BUG FIX: List vs Dict handler
+                        if isinstance(tasks, list):
+                            task_items = enumerate(tasks)
+                        elif isinstance(tasks, dict):
+                            task_items = tasks.items()
+                        else:
+                            task_items = []
+                            
+                        for user_id, task in task_items:
+                            if not task or not isinstance(task, dict): continue
+                            
                             step = task.get("step")
                             
                             if step == "checking":
@@ -242,7 +255,8 @@ async def firebase_polling():
                             elif step == "downloading":
                                 asyncio.create_task(process_webapp_downloading(user_id, task.get("url"), task.get("res")))
         except Exception as e:
-            pass
+            print("⚠️ Firebase Polling Error:", e)
+            
         await asyncio.sleep(1.5) # Har 1.5 seconds me Firebase check karega
 
 # ==========================================
