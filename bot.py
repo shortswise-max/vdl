@@ -91,7 +91,7 @@ def get_formats(url):
 @app.on_message(filters.command("start"))
 async def start(client, message):
     # 🔴 APNA ASLI BLOGGER WALA LINK DALEIN 🔴
-    BLOGGER_URL = "https://aapka-blogger-link.blogspot.com"
+    BLOGGER_URL = "https://unidl.blogspot.com"
     
     markup = ReplyKeyboardMarkup(
         [[KeyboardButton("🎬 Open Downloader App", web_app=WebAppInfo(url=BLOGGER_URL))]],
