@@ -1,11 +1,12 @@
 import asyncio
 asyncio.set_event_loop(asyncio.new_event_loop())
 
-import os, time, math, subprocess, aiohttp
+import os, time, math, subprocess, aiohttp, uuid, glob, shutil
 from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, 
-    ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
+    ReplyKeyboardMarkup, KeyboardButton, WebAppInfo,
+    InputMediaPhoto, InputMediaVideo
 )
 import yt_dlp
 from pyrogram.errors import MessageNotModified, FloodWait
@@ -22,27 +23,19 @@ async def get_coins(user_id):
             async with session.get(f"{FIREBASE_URL}/users/{user_id}/coins.json") as resp:
                 data = await resp.json()
                 if data is None:
-                    # Naya user aaya hai, 5 coins de do
                     await update_coins_db(user_id, 5, is_set=True)
                     return 5
                 return int(data)
-    except Exception as e:
-        print("Firebase Error:", e)
+    except Exception:
         return 0
 
 async def update_coins_db(user_id, amount, is_set=False):
     try:
-        if is_set:
-            new_coins = amount
-        else:
-            current = await get_coins(user_id)
-            new_coins = current + amount
-            
+        new_coins = amount if is_set else (await get_coins(user_id)) + amount
         async with aiohttp.ClientSession() as session:
             async with session.put(f"{FIREBASE_URL}/users/{user_id}/coins.json", json=new_coins) as resp:
                 return new_coins
-    except Exception as e:
-        print("Firebase PUT Error:", e)
+    except Exception:
         return 0
 
 # ==========================================
@@ -62,16 +55,12 @@ URL_CACHE = {}
 GLOBAL_CANCEL = False
 
 # ==========================================
-# 2. HELPER FUNCTIONS
+# 2. HELPER FUNCTIONS & DOWNLOADERS
 # ==========================================
 def format_bytes(size):
-    # 🔥 FIX: Agar yt-dlp None bhejta hai toh crash nahi hoga
     if size is None: return '0 B'
-    try:
-        size = int(size)
-    except:
-        return '0 B'
-        
+    try: size = int(size)
+    except: return '0 B'
     if not size: return '0 B'
     power = 2**10
     n = 0
@@ -84,25 +73,43 @@ def generate_thumbnail(video_path, thumbnail_path):
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", "00:00:50", "-i", video_path, "-vframes", "1", "-q:v", "2", "-vf", "scale=320:-1", thumbnail_path, "-y"]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0: return thumbnail_path
-        cmd[5] = "00:00:02"
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0: return thumbnail_path
     except Exception: pass
     return None
 
 def get_formats(url):
     ydl_opts = {'socket_timeout': 15, 'retries': 3, 'quiet': True, 'noplaylist': True, 'impersonate': ImpersonateTarget.from_str('chrome'), 'extractor_args': {'youtube': ['player_client=ios,android']}, 'http_headers': {'User-Agent': 'Mozilla/5.0'}}
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        formats = info.get('formats', [])
-        resolutions = set()
-        for f in formats:
-            h = f.get('height')
-            if h and isinstance(h, int) and h >= 144: resolutions.add(h)
-        common_res = [144, 240, 360, 480, 720, 1080, 1440, 2160]
-        available_res = sorted([r for r in resolutions if r in common_res])
-        if not available_res: available_res = sorted(list(resolutions)) 
-        return available_res, info.get('extractor_key', 'Unknown Website')
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            formats = info.get('formats', [])
+            resolutions = set()
+            for f in formats:
+                h = f.get('height')
+                if h and isinstance(h, int) and h >= 144: resolutions.add(h)
+            common_res = [144, 240, 360, 480, 720, 1080, 1440, 2160]
+            available_res = sorted([r for r in resolutions if r in common_res])
+            if not available_res: available_res = sorted(list(resolutions)) 
+            return available_res, info.get('extractor_key', 'Unknown Website')
+    except Exception as e:
+        # 🔥 MAGIC FIX: Agar "No video formats" aaya (Instagram Image post), toh Gallery return karega
+        if "No video" in str(e) or "video formats found" in str(e):
+            return [0], "Instagram/Gallery" # 0 matlab Image Gallery
+        raise e
+
+# 🔥 GALLERY-DL FUNCTION (For Images/Carousels)
+def run_gallery_dl(url):
+    uid = str(uuid.uuid4())
+    out_dir = f"downloads/{uid}"
+    os.makedirs(out_dir, exist_ok=True)
+    
+    cmd = ["gallery-dl", "-d", out_dir, url]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    files = []
+    for ext in ('*.jpg', '*.jpeg', '*.png', '*.webp', '*.mp4'):
+        files.extend(glob.glob(os.path.join(out_dir, "**", ext), recursive=True))
+    
+    return files, out_dir
 
 class CancelledError(Exception): pass
 class MyLogger(object):
@@ -119,37 +126,25 @@ def download_with_ytdlp(url, msg, selected_res, loop):
     last_edit_time = [0]
     
     def progress_hook(d):
-        if GLOBAL_CANCEL or (msg_id and CANCEL_TASKS.get(msg_id)): raise CancelledError("Download Cancelled")
+        if GLOBAL_CANCEL or (msg_id and CANCEL_TASKS.get(msg_id)): raise CancelledError("Cancelled")
         if msg.chat.id < 0: return
-        
         if d['status'] == 'downloading':
             current_time = time.time()
             if current_time - last_edit_time[0] > 5.0: 
                 last_edit_time[0] = current_time
-                
-                # 🔥 FIX: None values ko safe 0 me convert karna
-                downloaded = d.get('downloaded_bytes')
-                if downloaded is None: downloaded = 0
-                
-                total = d.get('total_bytes') or d.get('total_bytes_estimate')
-                if total is None: total = 0
-                
-                speed = d.get('speed')
-                if speed is None: speed = 0
+                downloaded = d.get('downloaded_bytes'); downloaded = downloaded if downloaded else 0
+                total = d.get('total_bytes') or d.get('total_bytes_estimate'); total = total if total else 0
+                speed = d.get('speed'); speed = speed if speed else 0
                 
                 if total > 0:
                     percentage = downloaded * 100 / total
                     progress = "[{0}{1}]".format(''.join(["█" for i in range(math.floor(percentage / 10))]), ''.join(["░" for i in range(10 - math.floor(percentage / 10))]))
-                    text = f"⚡ **Downloading...** {selected_res}p\n📊 {progress} **{round(percentage, 2)}%**\n📦 **Size:** {format_bytes(downloaded)} / {format_bytes(total)}\n⚡ **Speed:** {format_bytes(speed)}/s"
+                    text = f"⚡ **Downloading...**\n📊 {progress} **{round(percentage, 2)}%**\n📦 **Size:** {format_bytes(downloaded)} / {format_bytes(total)}\n⚡ **Speed:** {format_bytes(speed)}/s"
                 else:
-                    text = f"⚡ **Downloading...** {selected_res}p\n📦 {format_bytes(downloaded)}\n⚡ {format_bytes(speed)}/s"
-                
-                reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg_id}")]])
-                async def edit_message():
-                    try: await msg.edit_text(text, reply_markup=reply_markup)
-                    except: pass
-                asyncio.run_coroutine_threadsafe(edit_message(), loop)
+                    text = f"⚡ **Downloading...**\n📦 {format_bytes(downloaded)}\n⚡ {format_bytes(speed)}/s"
+                asyncio.run_coroutine_threadsafe(msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg_id}")]])), loop)
 
+    # 🔥 Yahan FFmpeg Best quality merge enabled hai! (Kyunki ab apt.txt fix ho jayega)
     ydl_opts = {'socket_timeout': 15, 'retries': 3, 'fragment_retries': 3, 'outtmpl': '%(id)s.%(ext)s', 'format': f'bestvideo[height<={selected_res}]+bestaudio/best[height<={selected_res}]/best', 'merge_output_format': 'mp4', 'fixup': 'never', 'quiet': True, 'noplaylist': True, 'impersonate': ImpersonateTarget.from_str('chrome'), 'extractor_args': {'youtube': ['player_client=ios,android']}, 'external_downloader': 'aria2c', 'external_downloader_args': ['-c', '-x', '16', '-s', '16', '-k', '1M', '--connect-timeout=15', '--timeout=20', '--max-tries=5'], 'logger': MyLogger(msg_id) if msg_id else MyLogger("none"), 'progress_hooks': [progress_hook]}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -175,9 +170,8 @@ async def progress_bar(current, total, msg, start_time, action="Uploading"):
         speed = current / diff
         time_to_completion = round((total - current) / speed) if speed > 0 else 0
         progress = "[{0}{1}]".format(''.join(["█" for i in range(math.floor(percentage / 10))]), ''.join(["░" for i in range(10 - math.floor(percentage / 10))]))
-        text = f"🚀 **{action}...**\n📊 {progress} **{round(percentage, 2)}%**\n📦 **Size:** {format_bytes(current)} / {format_bytes(total)}\n⚡ **Speed:** {format_bytes(speed)}/s\n⏳ **ETA:** {time_to_completion}s"
-        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg.id}")]])
-        try: await msg.edit_text(text, reply_markup=reply_markup)
+        text = f"🚀 **{action}...**\n📊 {progress} **{round(percentage, 2)}%**\n📦 **Size:** {format_bytes(current)} / {format_bytes(total)}\n⚡ **Speed:** {format_bytes(speed)}/s"
+        try: await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg.id}")]]))
         except: pass
 
 async def process_queue():
@@ -191,6 +185,31 @@ async def process_queue():
 
         try:
             cancel_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg.id}")]]) if msg.chat.id > 0 else None
+            
+            # 🔥 GALLEY DL LOGIC (Agar selected res 0 hai)
+            if int(selected_res) == 0:
+                await msg.edit_text("📸 Fetching Gallery/Images...", reply_markup=cancel_markup)
+                files, out_dir = await asyncio.to_thread(run_gallery_dl, url)
+                
+                if not files:
+                    raise Exception("No images/videos found in this post.")
+                
+                media_group = []
+                for f in files:
+                    if f.lower().endswith('.mp4'): media_group.append(InputMediaVideo(f))
+                    else: media_group.append(InputMediaPhoto(f))
+                
+                await msg.edit_text("📤 Uploading Album/Carousel...", reply_markup=cancel_markup)
+                for i in range(0, len(media_group), 10):
+                    await app.send_media_group(chat_id, media_group[i:i+10])
+                    await asyncio.sleep(2)
+                
+                shutil.rmtree(out_dir, ignore_errors=True)
+                await msg.delete()
+                download_queue.task_done()
+                continue
+            
+            # NORMAL YT-DLP VIDEO DOWNLOAD LOGIC
             await msg.edit_text(f"⚡ Downloading locally...\nQuality: {selected_res}p", reply_markup=cancel_markup)
             current_loop = asyncio.get_running_loop()
             info, filename = await asyncio.to_thread(download_with_ytdlp, url, msg, selected_res, current_loop)
@@ -237,20 +256,16 @@ async def process_queue():
             except: pass
 
 # ==========================================
-# 3. FIREBASE BACKGROUND BRIDGE (WebApp Se Baat)
+# 3. FIREBASE BACKGROUND BRIDGE
 # ==========================================
 async def process_webapp_checking(user_id, url):
-    print(f"🔍 Checking URL for User {user_id}: {url}")
     async with aiohttp.ClientSession() as session:
         await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "processing_check"})
         try:
             res_list, website = await asyncio.to_thread(get_formats, url)
-            if not res_list: 
-                res_list = [360, 480, 720, 1080]
-            print(f"✅ Qualities Found: {res_list}")
+            if not res_list: res_list = [360, 480, 720, 1080]
         except Exception as e:
-            # 🔥 FIX: Agar error aaye toh fallback qualities dega, WebApp par error nahi jayegi
-            print(f"⚠️ yt-dlp Format Fetch Failed: {str(e)} -> Using Defaults")
+            # Agar quality fetch fail ho jaye (like YT restrictions), fallback to standard
             res_list = [360, 480, 720, 1080]
             website = "Media Link"
             
@@ -260,65 +275,47 @@ async def process_webapp_checking(user_id, url):
                 "qualities": res_list,
                 "website": website
             })
-        except Exception as e:
-            print("Firebase Patch Error:", e)
+        except: pass
 
 async def process_webapp_downloading(user_id, url, res):
-    print(f"📥 Download triggered for User {user_id} - Quality: {res}p")
     async with aiohttp.ClientSession() as session:
         await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={"step": "completed"})
     try:
-        msg = await app.send_message(int(user_id), f"✅ Task Received from WebApp!\n**Link:** {url}\n**Quality:** {res}p\n⏳ Processing...")
+        quality_text = "Images/Gallery" if int(res) == 0 else f"{res}p"
+        msg = await app.send_message(int(user_id), f"✅ Link Received from WebApp!\n**Quality:** {quality_text}\n⏳ Processing...")
         URL_CACHE[msg.id] = url
         queue_display.append(url)
-        await download_queue.put((url, int(user_id), msg, res))
+        await download_queue.put((url, int(user_id), msg, int(res)))
     except Exception as e:
         print("❌ Telegram Send Error:", e)
 
 async def firebase_polling():
-    print("🚀 Firebase Bridge Polling Started...")
     while True:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{FIREBASE_URL}/tasks.json") as resp:
                     tasks = await resp.json()
-                    
                     if tasks:
-                        # 🔥 BUG FIX: Handle list or dict return from Firebase correctly
-                        if isinstance(tasks, list):
-                            task_items = enumerate(tasks)
-                        elif isinstance(tasks, dict):
-                            task_items = tasks.items()
-                        else:
-                            task_items = []
+                        if isinstance(tasks, list): task_items = enumerate(tasks)
+                        elif isinstance(tasks, dict): task_items = tasks.items()
+                        else: task_items = []
                             
                         for user_id, task in task_items:
                             if not task or not isinstance(task, dict): continue
-                            
                             step = task.get("step")
-                            if step == "checking":
-                                asyncio.create_task(process_webapp_checking(user_id, task.get("url")))
-                            elif step == "downloading":
-                                asyncio.create_task(process_webapp_downloading(user_id, task.get("url"), task.get("res")))
-        except Exception as e:
-            # print("⚠️ Firebase Polling Error:", e) # Commented to avoid spam on random drops
-            pass
-            
+                            if step == "checking": asyncio.create_task(process_webapp_checking(user_id, task.get("url")))
+                            elif step == "downloading": asyncio.create_task(process_webapp_downloading(user_id, task.get("url"), task.get("res")))
+        except Exception: pass
         await asyncio.sleep(1.5)
 
 # ==========================================
-# 4. TELEGRAM HANDLERS
+# 4. TELEGRAM COMMANDS
 # ==========================================
 @app.on_message(filters.command("start"))
 async def start(client, message):
     # 🔴 YAHAN APNA ASLI BLOGGER WALA LINK DALEIN 🔴
     BLOGGER_URL = "https://aapka-blogger-link.blogspot.com"
-    
-    markup = ReplyKeyboardMarkup(
-        [[KeyboardButton("🎬 Open Downloader App", web_app=WebAppInfo(url=BLOGGER_URL))]],
-        resize_keyboard=True
-    )
-    
+    markup = ReplyKeyboardMarkup([[KeyboardButton("🎬 Open Downloader App", web_app=WebAppInfo(url=BLOGGER_URL))]], resize_keyboard=True)
     coins = await get_coins(message.from_user.id)
     text = (f"Hello! Main Smart WebApp Downloader hoon.\n\n🪙 **Your Coins:** {coins}\n*(1 Download = 1 Coin. Get free coins by watching ads!)*\n\n👇 Niche diye gaye **Open Downloader App** button pe click karo!")
     await message.reply_text(text, reply_markup=markup)
@@ -347,8 +344,9 @@ async def cancel_all(client, message):
     GLOBAL_CANCEL = False
 
 if __name__ == "__main__":
-    print("Bot is running with Firebase Bridge!")
+    print("Bot is running with Firebase Bridge & Gallery-dl!")
     loop = asyncio.get_event_loop()
     loop.create_task(process_queue())
     loop.create_task(firebase_polling()) 
     app.run()
+        
