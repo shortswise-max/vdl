@@ -1,5 +1,5 @@
 pyrogram
 tgcrypto
 yt-dlp[default,curl-cffi]
-flask
-gunicorn
+aiohttp
+aiohttp-cors
