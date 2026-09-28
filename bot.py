@@ -5,13 +5,15 @@ import os
 import time
 import math
 import subprocess
+import json
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import (
+    InlineKeyboardMarkup, InlineKeyboardButton, 
+    ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
+)
 import yt_dlp
 from pyrogram.errors import MessageNotModified, FloodWait
 from yt_dlp.networking.impersonate import ImpersonateTarget
-from aiohttp import web
-import aiohttp_cors
 
 # ==========================================
 # 1. BOT CREDENTIALS
@@ -126,10 +128,7 @@ class MyLogger(object):
 
 def get_formats(url):
     ydl_opts = {
-        'socket_timeout': 15, 
-        'retries': 3,
-        'quiet': True,
-        'noplaylist': True,
+        'socket_timeout': 15, 'retries': 3, 'quiet': True, 'noplaylist': True,
         'impersonate': ImpersonateTarget.from_str('chrome'),
         'extractor_args': {'youtube': ['player_client=ios,android']},
         'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
@@ -140,23 +139,18 @@ def get_formats(url):
         resolutions = set()
         for f in formats:
             h = f.get('height')
-            if h and isinstance(h, int) and h >= 144:
-                resolutions.add(h)
+            if h and isinstance(h, int) and h >= 144: resolutions.add(h)
         
         common_res = [144, 240, 360, 480, 720, 1080, 1440, 2160]
         available_res = sorted([r for r in resolutions if r in common_res])
-        if not available_res:
-            available_res = sorted(list(resolutions)) 
+        if not available_res: available_res = sorted(list(resolutions)) 
             
         return available_res, info.get('extractor_key', 'Unknown Website')
 
 def extract_info_only(url, selected_res):
     ydl_opts = {
-        'socket_timeout': 15, 
-        'retries': 3,
-        'format': f'best[height<={selected_res}]', 
-        'quiet': True,
-        'noplaylist': True,
+        'socket_timeout': 15, 'retries': 3, 'format': f'best[height<={selected_res}]', 
+        'quiet': True, 'noplaylist': True,
         'impersonate': ImpersonateTarget.from_str('chrome'),
         'extractor_args': {'youtube': ['player_client=ios,android']},
         'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
@@ -176,8 +170,7 @@ def download_with_ytdlp(url, msg, selected_res, loop):
         if GLOBAL_CANCEL or (msg_id and CANCEL_TASKS.get(msg_id)):
             raise CancelledError("Download Cancelled")
             
-        if msg.chat.id < 0:
-            return
+        if msg.chat.id < 0: return
 
         if d['status'] == 'downloading':
             current_time = time.time()
@@ -249,8 +242,7 @@ async def process_queue():
         url, chat_id, msg, selected_res = task  
         GLOBAL_CANCEL = False
         
-        if url in queue_display:
-            queue_display.remove(url) 
+        if url in queue_display: queue_display.remove(url) 
 
         if msg is None:
             try:
@@ -297,8 +289,7 @@ async def process_queue():
                         if GLOBAL_CANCEL: raise Exception("Global Cancel triggered")
                         try:
                             await asyncio.wait_for(
-                                app.send_video(chat_id=chat_id, video=direct_url, caption=caption_text, supports_streaming=True),
-                                timeout=60 
+                                app.send_video(chat_id=chat_id, video=direct_url, caption=caption_text, supports_streaming=True), timeout=60 
                             )
                             direct_success = True
                             break
@@ -378,16 +369,26 @@ async def process_queue():
         except ValueError: pass
         await asyncio.sleep(2.5)
 
+
 # ==========================================
 # 6. TELEGRAM COMMANDS & HANDLERS
 # ==========================================
+
 @app.on_message(filters.command("start"))
 async def start(client, message):
+    # 🔴 YAHAN APNA ASLI BLOGGER WALA LINK DAAL DO 🔴
+    BLOGGER_URL = "https://unidl.blogspot.com"
+    
+    markup = ReplyKeyboardMarkup(
+        [[KeyboardButton("🎬 Open Downloader App", web_app=WebAppInfo(url=BLOGGER_URL))]],
+        resize_keyboard=True
+    )
+    
     await message.reply_text(
-        "Hello! Main v3.2 Premium Downloader hoon.\n\n"
-        "**Usage:**\n"
-        "1. Send a link to choose quality.\n"
-        "2. To BULK download in a specific quality, write the quality in the first line (e.g., 1080), then paste links below it."
+        "Hello! Main Premium Downloader hoon.\n\n"
+        "👇 Niche diye gaye **Open Downloader App** button pe click karo aur seedha URL daalkar download karo!\n"
+        "Ya phir mujhe yaha chat me bhi link bhej sakte ho.",
+        reply_markup=markup
     )
 
 @app.on_message(filters.command("queue"))
@@ -406,27 +407,46 @@ async def cancel_all(client, message):
     queue_display.clear()
     
     while not download_queue.empty():
-        try:
-            download_queue.get_nowait()
-            download_queue.task_done()
+        try: download_queue.get_nowait(); download_queue.task_done()
         except: pass
             
     subprocess.run(["pkill", "-f", "aria2c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["pkill", "-f", "ffmpeg"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     for msg_id in list(URL_CACHE.keys()) + list(CANCEL_TASKS.keys()) + list(STOP_UPLOAD.keys()):
-        CANCEL_TASKS[msg_id] = True
-        STOP_UPLOAD[msg_id] = True
+        CANCEL_TASKS[msg_id] = True; STOP_UPLOAD[msg_id] = True
         
-    await message.reply_text("🗑️ **BAM!** Pura queue aur current download WIPE OUT kar diya gaya hai! Bot ab ekdum free hai! ✅")
+    await message.reply_text("🗑️ **BAM!** Pura queue aur current download WIPE OUT kar diya gaya hai! ✅")
     await asyncio.sleep(2)
     GLOBAL_CANCEL = False
 
-@app.on_message(filters.text & ~filters.command(["start", "queue", "cancelall"]))
-async def handle_links(client, message):
+# MAGIC HANDLER: Ye WebApp se data aane par aur normal text links aane par dono ke liye kaam karega
+@app.on_message(filters.private & ~filters.command(["start", "queue", "cancelall"]))
+async def handle_messages(client, message):
+    
+    # CASE 1: Data Telegram WebApp se aaya hai (Blogger)
+    if getattr(message, "web_app_data", None):
+        try:
+            data = json.loads(message.web_app_data.data)
+            url = data.get("url")
+            res = int(data.get("res", 720))
+            
+            msg = await message.reply_text(f"✅ WebApp se link mil gaya!\n**Link:** {url}\n**Quality:** {res}p\n⏳ Processing...")
+            URL_CACHE[msg.id] = url
+            queue_display.append(url)
+            await download_queue.put((url, message.chat.id, msg, res))
+            
+        except Exception as e:
+            await message.reply_text(f"❌ WebApp Error: {str(e)}")
+        return
+
+    # CASE 2: User ne direct message me link bheja hai (Normal Flow)
+    if not message.text: return
+    
     lines = message.text.split('\n')
     auto_quality = None
     first_line = lines[0].strip()
+    
     if first_line.isdigit():
         auto_quality = int(first_line)
         lines = lines[1:] 
@@ -437,8 +457,7 @@ async def handle_links(client, message):
         for url in valid_urls:
             queue_display.append(url)
             await download_queue.put((url, message.chat.id, None, auto_quality))
-        if message.chat.id < 0: await message.reply_text(f"✅ **Bulk Queue Active:** {len(valid_urls)} links added silently in background ({auto_quality}p).")
-        else: await message.reply_text(f"✅ **Bulk Queue Active:** {len(valid_urls)} links added. Processing will show progress.")
+        await message.reply_text(f"✅ **Bulk Queue Active:** {len(valid_urls)} links added.")
         return
 
     for url in lines:
@@ -464,6 +483,7 @@ async def handle_links(client, message):
             await msg.edit_text(f"**🔗 Link:** {url}\n**🌐 Source:** {website}\n\n👇 **Select Quality to Download:**", reply_markup=reply_markup, disable_web_page_preview=True)
         except Exception as e:
             await msg.edit_text(f"❌ Error fetching qualities: {str(e)}")
+
 
 @app.on_callback_query(filters.regex(r"^res_"))
 async def select_resolution(client, callback_query):
@@ -491,72 +511,14 @@ async def cancel_callback(client, callback_query):
     except: pass
 
 # ==========================================
-# 7. WEB SERVER & BOT RUNNER (WEBAPP INTEGRATION)
+# 7. BOT RUNNER (NO WEB SERVER NEEDED)
 # ==========================================
-async def handle_webapp_request(request):
-    try:
-        data = await request.json()
-        url = data.get("url")
-        user_id = data.get("user_id")
-        selected_res = int(data.get("res", 720))
-
-        if not url or not user_id:
-            return web.json_response({"status": "error", "message": "Missing URL or User ID"}, status=400)
-        
-        # 1. Stream ke liye direct URL nikalo
-        info_direct = await asyncio.to_thread(extract_info_only, url, selected_res)
-        direct_url = info_direct.get('url') if info_direct else None
-        
-        if not direct_url:
-            return web.json_response({"status": "error", "message": "Bhai, streaming link nahi nikal paaya. Quality adjust kar ke try karo."}, status=400)
-
-        # 2. Queue me task daalo taaki bot download karein (msg=None bheja hai)
-        await download_queue.put((url, int(user_id), None, selected_res))
-
-        # 3. HTML WebApp ko URL do play karne ke liye
-        return web.json_response({"status": "success", "direct_url": direct_url})
-    except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)}, status=500)
-
-async def health_check(request):
-    return web.Response(text="Render is Happy! Bot & WebApp API Running Fine!")
-
-async def main():
-    print("========================================")
-    print("Bot + WebApp API is running purely on Render Cloud!")
-    print("Features: Ultimate Global Cancel | WebApp Streaming")
-    print("========================================")
-    
-    # Bot Start Karo
-    await app.start()
-    
-    # Background Worker Start Karo
-    asyncio.create_task(process_queue())
-    
-    # Aiohttp Web Server Start Karo (For WebApp and Render Port Binding)
-    web_app = web.Application()
-    cors = aiohttp_cors.setup(web_app, defaults={
-        "*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")
-    })
-    
-    # Routes
-    route_api = web_app.router.add_post('/api/process', handle_webapp_request)
-    route_health = web_app.router.add_get('/', health_check)
-    cors.add(route_api)
-    
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    
-    # Render PORT catch karega
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    
-    from pyrogram import idle
-    await idle()
-    await app.stop()
-
 if __name__ == "__main__":
+    print("========================================")
+    print("Bot is running seamlessly on Railway!")
+    print("Feature Active: WebApp integration (No domain needed)")
+    print("========================================")
+    
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
-  
+    loop.create_task(process_queue())
+    app.run()
