@@ -137,7 +137,13 @@ def download_with_ytdlp(url, msg, selected_res, loop):
                     text = f"⚡ **Downloading...**\n📊 {progress} **{round(percentage, 2)}%**\n📦 **Size:** {format_bytes(downloaded)} / {format_bytes(total)}\n⚡ **Speed:** {format_bytes(speed)}/s"
                 else:
                     text = f"⚡ **Downloading...**\n📦 {format_bytes(downloaded)}\n⚡ {format_bytes(speed)}/s"
-                asyncio.run_coroutine_threadsafe(msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg_id}")]])), loop)
+                
+                # 🔥 FIX: Pyrogram Coroutine Crash Fix (Thread-Safe Wrapper)
+                reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg_id}")]])
+                async def edit_message():
+                    try: await msg.edit_text(text, reply_markup=reply_markup)
+                    except: pass
+                asyncio.run_coroutine_threadsafe(edit_message(), loop)
 
     ydl_opts = {'socket_timeout': 15, 'retries': 3, 'fragment_retries': 3, 'outtmpl': '%(id)s.%(ext)s', 'format': f'bestvideo[height<={selected_res}]+bestaudio/best[height<={selected_res}]/best', 'merge_output_format': 'mp4', 'fixup': 'never', 'quiet': True, 'noplaylist': True, 'impersonate': ImpersonateTarget.from_str('chrome'), 'extractor_args': {'youtube': ['player_client=ios,android']}, 'external_downloader': 'aria2c', 'external_downloader_args': ['-c', '-x', '16', '-s', '16', '-k', '1M', '--connect-timeout=15', '--timeout=20', '--max-tries=5'], 'logger': MyLogger(msg_id) if msg_id else MyLogger("none"), 'progress_hooks': [progress_hook]}
     try:
@@ -165,6 +171,8 @@ async def progress_bar(current, total, msg, start_time, action="Uploading"):
         time_to_completion = round((total - current) / speed) if speed > 0 else 0
         progress = "[{0}{1}]".format(''.join(["█" for i in range(math.floor(percentage / 10))]), ''.join(["░" for i in range(10 - math.floor(percentage / 10))]))
         text = f"🚀 **{action}...**\n📊 {progress} **{round(percentage, 2)}%**\n📦 **Size:** {format_bytes(current)} / {format_bytes(total)}\n⚡ **Speed:** {format_bytes(speed)}/s"
+        
+        # 🔥 FIX: msg.id replace kiya msg_id ki jagah
         try: await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg.id}")]]))
         except: pass
 
@@ -236,7 +244,7 @@ async def process_queue():
             if thumb and os.path.exists(thumb): os.remove(thumb)
 
         except Exception as e:
-            # 🔥 REFUND LOGIC: Koi bhi error aayi toh coin wapas de do
+            # 🔥 REFUND LOGIC
             await update_coins_db(chat_id, 1) # Refund 1 Coin
             
             if "Cancelled" in str(e) or GLOBAL_CANCEL:
@@ -333,7 +341,7 @@ async def cancel_all(client, message):
     subprocess.run(["pkill", "-f", "aria2c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for msg_id in list(URL_CACHE.keys()) + list(CANCEL_TASKS.keys()) + list(STOP_UPLOAD.keys()):
         CANCEL_TASKS[msg_id] = True; STOP_UPLOAD[msg_id] = True
-    await message.reply_text("🗑️️ Pura queue WIPE OUT kar diya gaya hai! ✅")
+    await message.reply_text("🗑 Pura queue WIPE OUT kar diya gaya hai! ✅")
     await asyncio.sleep(2)
     GLOBAL_CANCEL = False
 
@@ -343,3 +351,4 @@ if __name__ == "__main__":
     loop.create_task(process_queue())
     loop.create_task(firebase_polling()) 
     app.run()
+    
