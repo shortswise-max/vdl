@@ -91,24 +91,19 @@ def get_formats(url):
             if not available_res: available_res = sorted(list(resolutions)) 
             return available_res, info.get('extractor_key', 'Unknown Website')
     except Exception as e:
-        # 🔥 MAGIC FIX: Agar "No video formats" aaya (Instagram Image post), toh Gallery return karega
         if "No video" in str(e) or "video formats found" in str(e):
-            return [0], "Instagram/Gallery" # 0 matlab Image Gallery
+            return [0], "Instagram/Gallery" 
         raise e
 
-# 🔥 GALLERY-DL FUNCTION (For Images/Carousels)
 def run_gallery_dl(url):
     uid = str(uuid.uuid4())
     out_dir = f"downloads/{uid}"
     os.makedirs(out_dir, exist_ok=True)
-    
     cmd = ["gallery-dl", "-d", out_dir, url]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
     files = []
     for ext in ('*.jpg', '*.jpeg', '*.png', '*.webp', '*.mp4'):
         files.extend(glob.glob(os.path.join(out_dir, "**", ext), recursive=True))
-    
     return files, out_dir
 
 class CancelledError(Exception): pass
@@ -144,7 +139,6 @@ def download_with_ytdlp(url, msg, selected_res, loop):
                     text = f"⚡ **Downloading...**\n📦 {format_bytes(downloaded)}\n⚡ {format_bytes(speed)}/s"
                 asyncio.run_coroutine_threadsafe(msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg_id}")]])), loop)
 
-    # 🔥 Yahan FFmpeg Best quality merge enabled hai! (Kyunki ab apt.txt fix ho jayega)
     ydl_opts = {'socket_timeout': 15, 'retries': 3, 'fragment_retries': 3, 'outtmpl': '%(id)s.%(ext)s', 'format': f'bestvideo[height<={selected_res}]+bestaudio/best[height<={selected_res}]/best', 'merge_output_format': 'mp4', 'fixup': 'never', 'quiet': True, 'noplaylist': True, 'impersonate': ImpersonateTarget.from_str('chrome'), 'extractor_args': {'youtube': ['player_client=ios,android']}, 'external_downloader': 'aria2c', 'external_downloader_args': ['-c', '-x', '16', '-s', '16', '-k', '1M', '--connect-timeout=15', '--timeout=20', '--max-tries=5'], 'logger': MyLogger(msg_id) if msg_id else MyLogger("none"), 'progress_hooks': [progress_hook]}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -186,7 +180,7 @@ async def process_queue():
         try:
             cancel_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg.id}")]]) if msg.chat.id > 0 else None
             
-            # 🔥 GALLEY DL LOGIC (Agar selected res 0 hai)
+            # GALLERY DL LOGIC
             if int(selected_res) == 0:
                 await msg.edit_text("📸 Fetching Gallery/Images...", reply_markup=cancel_markup)
                 files, out_dir = await asyncio.to_thread(run_gallery_dl, url)
@@ -209,7 +203,7 @@ async def process_queue():
                 download_queue.task_done()
                 continue
             
-            # NORMAL YT-DLP VIDEO DOWNLOAD LOGIC
+            # NORMAL YT-DLP LOGIC
             await msg.edit_text(f"⚡ Downloading locally...\nQuality: {selected_res}p", reply_markup=cancel_markup)
             current_loop = asyncio.get_running_loop()
             info, filename = await asyncio.to_thread(download_with_ytdlp, url, msg, selected_res, current_loop)
@@ -237,18 +231,22 @@ async def process_queue():
                     await asyncio.sleep(5)
 
             if upload_success: await msg.delete()
-            else: await msg.edit_text("❌ Upload failed after multiple attempts.")
+            else: raise Exception("Upload failed after multiple attempts.")
             if os.path.exists(filename): os.remove(filename)
             if thumb and os.path.exists(thumb): os.remove(thumb)
 
         except Exception as e:
+            # 🔥 REFUND LOGIC: Koi bhi error aayi toh coin wapas de do
+            await update_coins_db(chat_id, 1) # Refund 1 Coin
+            
             if "Cancelled" in str(e) or GLOBAL_CANCEL:
-                 try: await msg.edit_text("❌ Download Cancelled.")
+                 try: await msg.edit_text("❌ Download Cancelled.\n🪙 **1 Coin Refunded!**")
                  except: pass
                  subprocess.run(["pkill", "-f", "aria2c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
-                 try: await msg.edit_text(f"❌ Error: {str(e)}")
+                 try: await msg.edit_text(f"❌ Error: {str(e)}\n🪙 **1 Coin Refunded!**")
                  except: pass
+                 
         finally:
             if msg.id in CANCEL_TASKS: del CANCEL_TASKS[msg.id]
             if msg.id in STOP_UPLOAD: del STOP_UPLOAD[msg.id]
@@ -265,10 +263,8 @@ async def process_webapp_checking(user_id, url):
             res_list, website = await asyncio.to_thread(get_formats, url)
             if not res_list: res_list = [360, 480, 720, 1080]
         except Exception as e:
-            # Agar quality fetch fail ho jaye (like YT restrictions), fallback to standard
             res_list = [360, 480, 720, 1080]
             website = "Media Link"
-            
         try:
             await session.patch(f"{FIREBASE_URL}/tasks/{user_id}.json", json={
                 "step": "choosing",
@@ -325,8 +321,6 @@ async def cancel_callback(client, callback_query):
     msg_id = int(callback_query.data.split("_")[1])
     CANCEL_TASKS[msg_id] = True; STOP_UPLOAD[msg_id] = True 
     await callback_query.answer("Cancelling task... Please wait!", show_alert=True)
-    try: await callback_query.message.edit_text("❌ Task Cancelled.")
-    except: pass
 
 @app.on_message(filters.command("cancelall"))
 async def cancel_all(client, message):
@@ -339,14 +333,13 @@ async def cancel_all(client, message):
     subprocess.run(["pkill", "-f", "aria2c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for msg_id in list(URL_CACHE.keys()) + list(CANCEL_TASKS.keys()) + list(STOP_UPLOAD.keys()):
         CANCEL_TASKS[msg_id] = True; STOP_UPLOAD[msg_id] = True
-    await message.reply_text("🗑️ Pura queue WIPE OUT kar diya gaya hai! ✅")
+    await message.reply_text("🗑️️ Pura queue WIPE OUT kar diya gaya hai! ✅")
     await asyncio.sleep(2)
     GLOBAL_CANCEL = False
 
 if __name__ == "__main__":
-    print("Bot is running with Firebase Bridge & Gallery-dl!")
+    print("Bot is running with Complete UI & Refund Logic!")
     loop = asyncio.get_event_loop()
     loop.create_task(process_queue())
     loop.create_task(firebase_polling()) 
     app.run()
-        
