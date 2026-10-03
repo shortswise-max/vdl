@@ -23,7 +23,8 @@ async def get_coins(user_id):
             async with session.get(f"{FIREBASE_URL}/users/{user_id}/coins.json") as resp:
                 data = await resp.json()
                 if data is None:
-                    await update_coins_db(user_id, 5, is_set=True)
+                    # 🔥 BUG FIX: Ab Python DB me user create nahi karega, WebApp karega.
+                    # Isse welcome popup 100% chalega!
                     return 5
                 return int(data)
     except Exception:
@@ -138,7 +139,6 @@ def download_with_ytdlp(url, msg, selected_res, loop):
                 else:
                     text = f"⚡ **Downloading...**\n📦 {format_bytes(downloaded)}\n⚡ {format_bytes(speed)}/s"
                 
-                # 🔥 FIX: Pyrogram Coroutine Crash Fix (Thread-Safe Wrapper)
                 reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg_id}")]])
                 async def edit_message():
                     try: await msg.edit_text(text, reply_markup=reply_markup)
@@ -172,7 +172,6 @@ async def progress_bar(current, total, msg, start_time, action="Uploading"):
         progress = "[{0}{1}]".format(''.join(["█" for i in range(math.floor(percentage / 10))]), ''.join(["░" for i in range(10 - math.floor(percentage / 10))]))
         text = f"🚀 **{action}...**\n📊 {progress} **{round(percentage, 2)}%**\n📦 **Size:** {format_bytes(current)} / {format_bytes(total)}\n⚡ **Speed:** {format_bytes(speed)}/s"
         
-        # 🔥 FIX: msg.id replace kiya msg_id ki jagah
         try: await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg.id}")]]))
         except: pass
 
@@ -245,14 +244,14 @@ async def process_queue():
 
         except Exception as e:
             # 🔥 REFUND LOGIC
-            await update_coins_db(chat_id, 1) # Refund 1 Coin
+            await update_coins_db(chat_id, 1) # Refund 1 Credit
             
             if "Cancelled" in str(e) or GLOBAL_CANCEL:
-                 try: await msg.edit_text("❌ Download Cancelled.\n🪙 **1 Coin Refunded!**")
+                 try: await msg.edit_text("❌ Download Cancelled.\n⚡ **1 Credit Refunded!**")
                  except: pass
                  subprocess.run(["pkill", "-f", "aria2c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
-                 try: await msg.edit_text(f"❌ Error: {str(e)}\n🪙 **1 Coin Refunded!**")
+                 try: await msg.edit_text(f"❌ Error: {str(e)}\n⚡ **1 Credit Refunded!**")
                  except: pass
                  
         finally:
@@ -319,9 +318,15 @@ async def firebase_polling():
 async def start(client, message):
     # 🔴 YAHAN APNA ASLI BLOGGER WALA LINK DALEIN 🔴
     BLOGGER_URL = "https://aapka-blogger-link.blogspot.com"
-    markup = ReplyKeyboardMarkup([[KeyboardButton("🎬 Open Downloader App", web_app=WebAppInfo(url=BLOGGER_URL))]], resize_keyboard=True)
+    
+    # 🔥 FIX: Keyboard ki jagah Message ke andar ka Inline Button
+    markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🎬 Open Downloader App", web_app=WebAppInfo(url=BLOGGER_URL))]]
+    )
+    
     coins = await get_coins(message.from_user.id)
-    text = (f"Hello! Main Smart WebApp Downloader hoon.\n\n🪙 **Your Coins:** {coins}\n*(1 Download = 1 Coin. Get free coins by watching ads!)*\n\n👇 Niche diye gaye **Open Downloader App** button pe click karo!")
+    text = (f"Hello! Main Smart WebApp Downloader hoon.\n\n⚡ **Your Credits:** {coins}\n*(1 Download = 1 Credit. Get free credits by watching ads!)*\n\n👇 Niche diye gaye **Open Downloader App** button pe click karo!")
+    
     await message.reply_text(text, reply_markup=markup)
 
 @app.on_callback_query(filters.regex(r"^cancel_"))
@@ -346,7 +351,7 @@ async def cancel_all(client, message):
     GLOBAL_CANCEL = False
 
 if __name__ == "__main__":
-    print("Bot is running with Complete UI & Refund Logic!")
+    print("Bot is running with Inline Button & Confetti Fix!")
     loop = asyncio.get_event_loop()
     loop.create_task(process_queue())
     loop.create_task(firebase_polling()) 
