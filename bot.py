@@ -23,7 +23,7 @@ async def get_coins(user_id):
             async with session.get(f"{FIREBASE_URL}/users/{user_id}/coins.json") as resp:
                 data = await resp.json()
                 if data is None:
-                    # 🔥 BUG FIX: Ab Python DB me user create nahi karega, WebApp karega.
+                    # Ab Python DB me user create nahi karega, WebApp karega.
                     # Isse welcome popup 100% chalega!
                     return 5
                 return int(data)
@@ -316,18 +316,15 @@ async def firebase_polling():
 # ==========================================
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    # 🔴 YAHAN APNA ASLI BLOGGER WALA LINK DALEIN 🔴
-    BLOGGER_URL = "https://aapka-blogger-link.blogspot.com"
+    # Sirf chup-chap database check karega, koi message nahi bhejega.
+    # Pura silent rahega!
+    try:
+        await get_coins(message.from_user.id)
+    except:
+        pass
     
-    # 🔥 FIX: Keyboard ki jagah Message ke andar ka Inline Button
-    markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🎬 Open Downloader App", web_app=WebAppInfo(url=BLOGGER_URL))]]
-    )
-    
-    coins = await get_coins(message.from_user.id)
-    text = (f"Hello! Main Smart WebApp Downloader hoon.\n\n⚡ **Your Credits:** {coins}\n*(1 Download = 1 Credit. Get free credits by watching ads!)*\n\n👇 Niche diye gaye **Open Downloader App** button pe click karo!")
-    
-    await message.reply_text(text, reply_markup=markup)
+    # Return directly, nothing is sent to user.
+    return
 
 @app.on_callback_query(filters.regex(r"^cancel_"))
 async def cancel_callback(client, callback_query):
@@ -351,9 +348,8 @@ async def cancel_all(client, message):
     GLOBAL_CANCEL = False
 
 if __name__ == "__main__":
-    print("Bot is running with Inline Button & Confetti Fix!")
+    print("Bot is running silently for /start")
     loop = asyncio.get_event_loop()
     loop.create_task(process_queue())
     loop.create_task(firebase_polling()) 
     app.run()
-    
