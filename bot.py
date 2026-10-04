@@ -78,7 +78,20 @@ def generate_thumbnail(video_path, thumbnail_path):
     return None
 
 def get_formats(url):
-    ydl_opts = {'socket_timeout': 15, 'retries': 3, 'quiet': True, 'noplaylist': True, 'impersonate': ImpersonateTarget.from_str('chrome'), 'extractor_args': {'youtube': ['player_client=ios,android']}, 'http_headers': {'User-Agent': 'Mozilla/5.0'}}
+    ydl_opts = {
+        'socket_timeout': 15, 
+        'retries': 3, 
+        'quiet': True, 
+        'noplaylist': True, 
+        'impersonate': ImpersonateTarget.from_str('chrome'), 
+        'extractor_args': {'youtube': ['player_client=ios,android']}, 
+        'http_headers': {'User-Agent': 'Mozilla/5.0'}
+    }
+    
+    # 🔥 FIX: Adding cookies support here
+    if os.path.exists('youtube_cookies.txt'):
+        ydl_opts['cookiefile'] = 'youtube_cookies.txt'
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -145,7 +158,28 @@ def download_with_ytdlp(url, msg, selected_res, loop):
                     except: pass
                 asyncio.run_coroutine_threadsafe(edit_message(), loop)
 
-    ydl_opts = {'socket_timeout': 15, 'retries': 3, 'fragment_retries': 3, 'outtmpl': '%(id)s.%(ext)s', 'format': f'bestvideo[height<={selected_res}]+bestaudio/best[height<={selected_res}]/best', 'merge_output_format': 'mp4', 'fixup': 'never', 'quiet': True, 'noplaylist': True, 'impersonate': ImpersonateTarget.from_str('chrome'), 'extractor_args': {'youtube': ['player_client=ios,android']}, 'external_downloader': 'aria2c', 'external_downloader_args': ['-c', '-x', '16', '-s', '16', '-k', '1M', '--connect-timeout=15', '--timeout=20', '--max-tries=5'], 'logger': MyLogger(msg_id) if msg_id else MyLogger("none"), 'progress_hooks': [progress_hook]}
+    ydl_opts = {
+        'socket_timeout': 15, 
+        'retries': 3, 
+        'fragment_retries': 3, 
+        'outtmpl': '%(id)s.%(ext)s', 
+        'format': f'bestvideo[height<={selected_res}]+bestaudio/best[height<={selected_res}]/best', 
+        'merge_output_format': 'mp4', 
+        'fixup': 'never', 
+        'quiet': True, 
+        'noplaylist': True, 
+        'impersonate': ImpersonateTarget.from_str('chrome'), 
+        'extractor_args': {'youtube': ['player_client=ios,android']}, 
+        'external_downloader': 'aria2c', 
+        'external_downloader_args': ['-c', '-x', '16', '-s', '16', '-k', '1M', '--connect-timeout=15', '--timeout=20', '--max-tries=5'], 
+        'logger': MyLogger(msg_id) if msg_id else MyLogger("none"), 
+        'progress_hooks': [progress_hook]
+    }
+
+    # 🔥 FIX: Adding cookies support here too
+    if os.path.exists('youtube_cookies.txt'):
+        ydl_opts['cookiefile'] = 'youtube_cookies.txt'
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
