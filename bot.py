@@ -23,7 +23,8 @@ async def get_coins(user_id):
             async with session.get(f"{FIREBASE_URL}/users/{user_id}/coins.json") as resp:
                 data = await resp.json()
                 if data is None:
-                    return 5
+                    # Naye user ko 3 Credits
+                    return 3
                 return int(data)
     except Exception:
         return 0
@@ -76,7 +77,6 @@ def generate_thumbnail(video_path, thumbnail_path):
     return None
 
 def get_formats(url):
-    # 🔥 FIX: Changed 'player_client' to 'default,web_embedded' to bypass YouTube "Reload" error
     ydl_opts = {
         'socket_timeout': 15, 
         'retries': 3, 
@@ -156,7 +156,6 @@ def download_with_ytdlp(url, msg, selected_res, loop):
                     except: pass
                 asyncio.run_coroutine_threadsafe(edit_message(), loop)
 
-    # 🔥 FIX: Changed 'player_client' here as well
     ydl_opts = {
         'socket_timeout': 15, 
         'retries': 3, 
@@ -251,7 +250,7 @@ async def process_queue():
 
             thumb_path = f"thumb_{msg.id}.jpg"
             thumb = generate_thumbnail(filename, thumb_path)
-            local_caption = f"**🎬 Title:** {info.get('title', 'Unknown')}\n**🌐 Website:** {info.get('extractor_key', 'Unknown')}\n**⚙️️ Quality:** {selected_res}p\n**🔗 Source:** [Original Link]({url})"
+            local_caption = f"**🎬 Title:** {info.get('title', 'Unknown')}\n**🌐 Website:** {info.get('extractor_key', 'Unknown')}\n**⚙ Quality:** {selected_res}p\n**🔗 Source:** [Original Link]({url})"
 
             await msg.edit_text("📤 Uploading...", reply_markup=cancel_markup)
             start_time = time.time()
@@ -377,3 +376,4 @@ if __name__ == "__main__":
     loop.create_task(process_queue())
     loop.create_task(firebase_polling()) 
     app.run()
+            
