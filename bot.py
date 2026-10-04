@@ -23,8 +23,6 @@ async def get_coins(user_id):
             async with session.get(f"{FIREBASE_URL}/users/{user_id}/coins.json") as resp:
                 data = await resp.json()
                 if data is None:
-                    # Ab Python DB me user create nahi karega, WebApp karega.
-                    # Isse welcome popup 100% chalega!
                     return 5
                 return int(data)
     except Exception:
@@ -78,17 +76,17 @@ def generate_thumbnail(video_path, thumbnail_path):
     return None
 
 def get_formats(url):
+    # 🔥 FIX: Changed 'player_client' to 'default,web_embedded' to bypass YouTube "Reload" error
     ydl_opts = {
         'socket_timeout': 15, 
         'retries': 3, 
         'quiet': True, 
         'noplaylist': True, 
         'impersonate': ImpersonateTarget.from_str('chrome'), 
-        'extractor_args': {'youtube': ['player_client=ios,android']}, 
+        'extractor_args': {'youtube': ['player_client=default,web_embedded']}, 
         'http_headers': {'User-Agent': 'Mozilla/5.0'}
     }
     
-    # 🔥 FIX: Adding cookies support here
     if os.path.exists('youtube_cookies.txt'):
         ydl_opts['cookiefile'] = 'youtube_cookies.txt'
 
@@ -158,25 +156,25 @@ def download_with_ytdlp(url, msg, selected_res, loop):
                     except: pass
                 asyncio.run_coroutine_threadsafe(edit_message(), loop)
 
+    # 🔥 FIX: Changed 'player_client' here as well
     ydl_opts = {
         'socket_timeout': 15, 
         'retries': 3, 
         'fragment_retries': 3, 
         'outtmpl': '%(id)s.%(ext)s', 
-        'format': f'bestvideo[height<={selected_res}]+bestaudio/best[height<={selected_res}]/best', 
+        'format': f'b[height<={selected_res}]/bestvideo[height<={selected_res}]+bestaudio/best', 
         'merge_output_format': 'mp4', 
         'fixup': 'never', 
         'quiet': True, 
         'noplaylist': True, 
         'impersonate': ImpersonateTarget.from_str('chrome'), 
-        'extractor_args': {'youtube': ['player_client=ios,android']}, 
+        'extractor_args': {'youtube': ['player_client=default,web_embedded']}, 
         'external_downloader': 'aria2c', 
         'external_downloader_args': ['-c', '-x', '16', '-s', '16', '-k', '1M', '--connect-timeout=15', '--timeout=20', '--max-tries=5'], 
         'logger': MyLogger(msg_id) if msg_id else MyLogger("none"), 
         'progress_hooks': [progress_hook]
     }
 
-    # 🔥 FIX: Adding cookies support here too
     if os.path.exists('youtube_cookies.txt'):
         ydl_opts['cookiefile'] = 'youtube_cookies.txt'
 
@@ -221,7 +219,6 @@ async def process_queue():
         try:
             cancel_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{msg.id}")]]) if msg.chat.id > 0 else None
             
-            # GALLERY DL LOGIC
             if int(selected_res) == 0:
                 await msg.edit_text("📸 Fetching Gallery/Images...", reply_markup=cancel_markup)
                 files, out_dir = await asyncio.to_thread(run_gallery_dl, url)
@@ -244,7 +241,6 @@ async def process_queue():
                 download_queue.task_done()
                 continue
             
-            # NORMAL YT-DLP LOGIC
             await msg.edit_text(f"⚡ Downloading locally...\nQuality: {selected_res}p", reply_markup=cancel_markup)
             current_loop = asyncio.get_running_loop()
             info, filename = await asyncio.to_thread(download_with_ytdlp, url, msg, selected_res, current_loop)
@@ -255,7 +251,7 @@ async def process_queue():
 
             thumb_path = f"thumb_{msg.id}.jpg"
             thumb = generate_thumbnail(filename, thumb_path)
-            local_caption = f"**🎬 Title:** {info.get('title', 'Unknown')}\n**🌐 Website:** {info.get('extractor_key', 'Unknown')}\n**⚙️ Quality:** {selected_res}p\n**🔗 Source:** [Original Link]({url})"
+            local_caption = f"**🎬 Title:** {info.get('title', 'Unknown')}\n**🌐 Website:** {info.get('extractor_key', 'Unknown')}\n**⚙️️ Quality:** {selected_res}p\n**🔗 Source:** [Original Link]({url})"
 
             await msg.edit_text("📤 Uploading...", reply_markup=cancel_markup)
             start_time = time.time()
@@ -277,9 +273,7 @@ async def process_queue():
             if thumb and os.path.exists(thumb): os.remove(thumb)
 
         except Exception as e:
-            # 🔥 REFUND LOGIC
-            await update_coins_db(chat_id, 1) # Refund 1 Credit
-            
+            await update_coins_db(chat_id, 1)
             if "Cancelled" in str(e) or GLOBAL_CANCEL:
                  try: await msg.edit_text("❌ Download Cancelled.\n⚡ **1 Credit Refunded!**")
                  except: pass
@@ -350,14 +344,10 @@ async def firebase_polling():
 # ==========================================
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    # Sirf chup-chap database check karega, koi message nahi bhejega.
-    # Pura silent rahega!
     try:
         await get_coins(message.from_user.id)
     except:
         pass
-    
-    # Return directly, nothing is sent to user.
     return
 
 @app.on_callback_query(filters.regex(r"^cancel_"))
